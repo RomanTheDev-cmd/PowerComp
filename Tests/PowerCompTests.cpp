@@ -3,10 +3,12 @@
 //   powercomp_tests --calibrate  the OUTPUT that makes each factory preset as loud as its input (reference loop)
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <functional>
 #include <iostream>
 #include "DSP/CompEngine.h"
+#include "DSP/Learn.h"
 #include "Presets.h"
 
 using namespace pc;
@@ -567,6 +569,273 @@ void testPresets()
     expect (same, "the first preset is the fresh-instance sound");
 }
 
+//==============================================================================
+// LEARN (2026-10-28): signals of known character, an independent measure of what the suggestion does.
+Buf drumLoop (double sr, double seconds, double peakDb)
+{
+    const double pi = juce::MathConstants<double>::pi, beat = 60.0 / 140.0;
+    Buf b (2, (int) (seconds * sr));
+    juce::Random rng (77);
+    float prev = 0.0f;
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        const double t = i / sr, tb = std::fmod (t, beat), th = std::fmod (t, beat * 0.25);
+        const double kick = 0.9 * std::exp (-tb / 0.18) * std::sin (2.0 * pi * (48.0 * tb + 120.0 * 0.025 * (1.0 - std::exp (-tb / 0.025))));
+        const float noise = rng.nextFloat() * 2.0f - 1.0f;
+        const double hat = 0.35 * std::exp (-th / 0.015) * (noise - prev);
+        prev = noise;
+        const double clap = std::fmod (t + beat, 2.0 * beat) < beat ? 0.0 : 0.25 * std::exp (-tb / 0.05) * noise;
+        b.setSample (0, i, (float) (kick + hat + clap));
+        b.setSample (1, i, (float) (kick + 0.8 * hat + clap));
+    }
+    b.applyGain ((float) (std::pow (10.0, peakDb / 20.0) / b.getMagnitude (0, b.getNumSamples())));
+    return b;
+}
+
+Buf bassLine (double sr, double seconds, double peakDb)
+{
+    const double pi = juce::MathConstants<double>::pi, step = 60.0 / 140.0 / 2.0;
+    const double notes[] = { 41.2, 41.2, 49.0, 41.2, 55.0, 41.2, 49.0, 36.7 };
+    Buf b (2, (int) (seconds * sr));
+    double ph = 0.0;
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        const double t = i / sr, ts = std::fmod (t, step);
+        const double f = notes[(int) (t / step) % 8];
+        ph += f / sr;
+        double x = 0.0;
+        for (int k = 1; k <= 6; ++k) x += std::sin (2.0 * pi * k * ph) / (k * k);
+        x *= std::min (1.0, ts / 0.004) * (ts < step * 0.85 ? 1.0 : std::max (0.0, 1.0 - (ts - step * 0.85) / (step * 0.15)));
+        b.setSample (0, i, (float) x);
+        b.setSample (1, i, (float) x);
+    }
+    b.applyGain ((float) (std::pow (10.0, peakDb / 20.0) / b.getMagnitude (0, b.getNumSamples())));
+    return b;
+}
+
+Buf padChord (double sr, double seconds, double peakDb)
+{
+    const double pi = juce::MathConstants<double>::pi;
+    Buf b (2, (int) (seconds * sr));
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        const double t = i / sr;
+        double l = 0.0, r = 0.0;
+        for (double f : { 220.0, 261.63, 329.63, 440.0 })
+            for (int k = 1; k <= 8; ++k)
+            {
+                l += std::sin (2.0 * pi * k * f * 1.002 * t) / (k * 4.0);
+                r += std::sin (2.0 * pi * k * f * 0.998 * t + 0.3) / (k * 4.0);
+            }
+        const double env = std::min (1.0, t / 1.2) * (0.8 + 0.2 * std::sin (2.0 * pi * 0.2 * t));
+        b.setSample (0, i, (float) (l * env));
+        b.setSample (1, i, (float) (r * env));
+    }
+    b.applyGain ((float) (std::pow (10.0, peakDb / 20.0) / std::max (b.getMagnitude (0, 0, b.getNumSamples()), b.getMagnitude (1, 0, b.getNumSamples()))));
+    return b;
+}
+
+// Independent of Learn.h: run the engine in 10 ms blocks, take each band's reduction per block, keep the blocks
+// where the input is within 20 dB of its loudest block, and return the 90th percentile of each band.
+std::array<float, numBands> loudReduction (const CompParams& p, const Buf& in, double sr)
+{
+    const int block = (int) (0.01 * sr);
+    dsp::CompEngine e;
+    e.prepare (sr, block, p);
+    Buf out (in);
+    std::vector<float> lv;
+    std::array<std::vector<float>, numBands> red;
+    for (int pos = 0; pos + block <= out.getNumSamples(); pos += block)
+    {
+        lv.push_back ((float) db (std::max (in.getRMSLevel (0, pos, block), in.getRMSLevel (1, pos, block))));
+        float* ch[2] = { out.getWritePointer (0, pos), out.getWritePointer (1, pos) };
+        e.process (ch, 2, block, p);
+        for (int b = 0; b < numBands; ++b) red[(size_t) b].push_back (e.blockReductionDb[(size_t) b]);
+    }
+    const float top = *std::max_element (lv.begin(), lv.end());
+    std::array<float, numBands> res {};
+    for (int b = 0; b < numBands; ++b)
+    {
+        std::vector<float> v;
+        for (size_t k = 0; k < lv.size(); ++k)
+            if (lv[k] >= top - 20.0f) v.push_back (red[(size_t) b][k]);
+        std::sort (v.begin(), v.end());
+        res[(size_t) b] = v.empty() ? 0.0f : v[(size_t) (0.9 * (double) (v.size() - 1))];
+    }
+    return res;
+}
+
+learn::Suggestion learnOn (const Buf& b, double sr, learn::Profile profile, float amount)
+{
+    return learn::analyse (b.getReadPointer (0), b.getReadPointer (1), b.getNumSamples(), sr, profile, amount, CompParams());
+}
+
+void testLearnAuto()
+{
+    // AUTO adapts to the material: an already squashed loop (low crest factor) gets less extra reduction than a
+    // dynamic one, and a low-heavy one gets LOW|MID above its fundamental.
+    const double sr = 48000.0;
+    auto squash = [] (Buf b) { for (int c = 0; c < 2; ++c) for (int i = 0; i < b.getNumSamples(); ++i) b.setSample (c, i, std::tanh (6.0f * b.getSample (c, i)) * 0.7f); return b; };
+    const auto dynamic = drumLoop (sr, 8.0, -3.0), squashed = squash (drumLoop (sr, 8.0, -3.0));
+    const auto sd = learnOn (dynamic, sr, learn::Profile::automatic, 0.5f), ss = learnOn (squashed, sr, learn::Profile::automatic, 0.5f);
+    expect (sd.valid && ss.valid && sd.features.crestDb > ss.features.crestDb + 3.0f && sd.targetDb[1] > ss.targetDb[1] + 1.0f,
+            "LEARN AUTO aims less at squashed material (crest " + f2 (sd.features.crestDb) + " / " + f2 (ss.features.crestDb) + " dB, aim "
+            + f2 (sd.targetDb[1]) + " / " + f2 (ss.targetDb[1]) + " dB)");
+    const auto sb = learnOn (bassLine (sr, 8.0, -3.0), sr, learn::Profile::automatic, 0.5f);
+    expect (sb.valid && sb.profile == learn::Profile::automatic && sb.params.lowSplitHz > 60.0f && sb.params.lowSplitHz < 200.0f,
+            "LEARN AUTO puts LOW|MID above the fundamental of a bass (" + juce::String (sb.params.lowSplitHz, 0) + " Hz)");
+    for (const auto& b : { padChord (sr, 8.0, -3.0), referenceLoop (sr) })
+    {
+        const auto s = learnOn (b, sr, learn::Profile::automatic, 0.5f);
+        const auto got = loudReduction (s.params, b, sr);
+        bool near = s.valid;
+        for (int k = 0; k < numBands; ++k)
+            near = near && (s.params.comp[(size_t) k] >= 0.99f || std::abs (got[(size_t) k] - s.targetDb[(size_t) k]) <= 1.5f);
+        expect (near, "LEARN AUTO reaches its aim on a pad and on a mix (LOW " + f2 (got[0]) + " of " + f2 (s.targetDb[0]) + " dB)");
+    }
+}
+
+// A band with (almost) nothing in it is left alone: pushing its COMPRESS to the top would not reach the aim, and AUTO
+// GAIN would lift the near-empty band by up to +26 dB (found on the pads of the references, 2026-10-28).
+void testLearnEmptyBand()
+{
+    const double sr = 48000.0;
+    Buf pad (2, (int) (8.0 * sr)); // a bright held chord: nothing at all near the LOW band
+    for (int i = 0; i < pad.getNumSamples(); ++i)
+    {
+        const double t = i / sr, env = std::min (1.0, t / 1.0);
+        double x = 0.0;
+        for (double f : { 1000.0, 1250.0, 1500.0 }) x += 0.2 * std::sin (2.0 * juce::MathConstants<double>::pi * f * t);
+        pad.setSample (0, i, (float) (x * env));
+        pad.setSample (1, i, (float) (x * env));
+    }
+    for (auto profile : { learn::Profile::automatic, learn::Profile::pad })
+    {
+        const auto s = learnOn (pad, sr, profile, 0.5f);
+        expect (s.valid && s.params.comp[0] == 0.0f && std::abs (s.params.outputDb) <= 6.0f,
+                "LEARN leaves an empty LOW band alone (" + learn::profileNames()[(int) profile] + ": COMPRESS " + f2 (s.params.comp[0])
+                + ", OUTPUT " + f2 (s.params.outputDb) + " dB)");
+    }
+}
+
+// LEARN compresses the dynamics, not the tone: each band comes out as loud (RMS) as it went in, also on quiet
+// material, where AUTO GAIN alone (a fixed compensation for a typical band level) would tilt the bands by many dB.
+double bandRmsDb (const Buf& b, double sr, const CompParams& splits, int band)
+{
+    CompParams q = neutral();
+    q.lowSplitHz = splits.lowSplitHz; q.highSplitHz = splits.highSplitHz;
+    q.solo = { band == 0, band == 1, band == 2 };
+    const auto x = process (q, b, sr);
+    return db (std::sqrt (0.5 * (std::pow (x.getRMSLevel (0, 0, x.getNumSamples()), 2) + std::pow (x.getRMSLevel (1, 0, x.getNumSamples()), 2))));
+}
+
+void testLearnKeepsTone()
+{
+    const double sr = 48000.0;
+    for (double level : { -3.0, -24.0 })
+    {
+        auto in = referenceLoop (sr);
+        in.applyGain ((float) std::pow (10.0, (level + 3.0) / 20.0));
+        const auto s = learnOn (in, sr, learn::Profile::automatic, 0.5f);
+        const auto out = process (s.params, in, sr);
+        juce::String detail;
+        bool ok = s.valid;
+        for (int b = 0; b < numBands; ++b)
+        {
+            const double d = bandRmsDb (out, sr, s.params, b) - bandRmsDb (in, sr, s.params, b);
+            ok = ok && std::abs (d) <= 1.5;
+            detail << (b ? ", " : "") << f2 (d);
+        }
+        expect (ok, "LEARN keeps the balance of the bands at " + juce::String (level, 0) + " dBFS (change " + detail + " dB; "
+                + (s.valid ? "COMPRESS " + f2 (s.params.comp[0]) + " " + f2 (s.params.comp[1]) + " " + f2 (s.params.comp[2]) + ", GAIN "
+                   + f2 (s.params.gainDb[0]) + " " + f2 (s.params.gainDb[1]) + " " + f2 (s.params.gainDb[2]) : juce::String ("nothing learned")) + ")");
+    }
+}
+
+void testLearnHitsTarget()
+{
+    const double sr = 48000.0;
+    std::array<float, numBands> compLoud {}, compQuiet {};
+    for (double level : { -3.0, -20.0 })
+    {
+        const auto in = drumLoop (sr, 8.0, level);
+        const auto s = learnOn (in, sr, learn::Profile::drums, 0.5f);
+        const auto got = loudReduction (s.params, in, sr);
+        for (int b = 0; b < numBands; ++b)
+        {
+            const auto bi = (size_t) b;
+            if (! s.valid || s.params.comp[bi] < 0.99f)
+                expect (s.valid && std::abs (got[bi] - s.targetDb[bi]) <= 1.5f && s.targetDb[bi] > 0.5f,
+                        "LEARN DRUMS at " + juce::String (level, 0) + " dBFS: band " + juce::String (b) + " loud parts reduced by "
+                        + f2 (got[bi]) + " dB, aimed " + f2 (s.targetDb[bi]));
+            (level > -10.0 ? compLoud : compQuiet)[bi] = s.params.comp[bi];
+        }
+    }
+    for (int b = 0; b < numBands; ++b)
+        expect (compQuiet[(size_t) b] > compLoud[(size_t) b] + 0.05f, "LEARN on a quieter track sets more COMPRESS (band " + juce::String (b)
+                + ": " + f2 (compQuiet[(size_t) b]) + " vs " + f2 (compLoud[(size_t) b]) + ")");
+}
+
+void testLearnAmountAndLevel()
+{
+    const double sr = 48000.0;
+    const auto in = bassLine (sr, 8.0, -6.0);
+    const auto none = learnOn (in, sr, learn::Profile::bass, 0.0f);
+    const auto half = learnOn (in, sr, learn::Profile::bass, 0.5f);
+    const auto full = learnOn (in, sr, learn::Profile::bass, 1.0f);
+    const auto r0 = loudReduction (none.params, in, sr), r5 = loudReduction (half.params, in, sr), r1 = loudReduction (full.params, in, sr);
+    expect (none.valid && r0[0] < 0.5f && none.params.upward < 0.01f, "LEARN AMOUNT 0 compresses nothing (LOW " + f2 (r0[0]) + " dB)");
+    expect (half.valid && full.valid && r1[0] > r5[0] + 1.5f && r5[0] > r0[0] + 1.5f,
+            "LEARN AMOUNT scales the reduction (LOW " + f2 (r0[0]) + " / " + f2 (r5[0]) + " / " + f2 (r1[0]) + " dB)");
+    // The suggestion keeps the loudness (A/B at the same level): OUTPUT matches output RMS to input RMS.
+    for (const auto* s : { &half, &full })
+    {
+        const auto out = process (s->params, in, sr);
+        const double dIn = db (in.getRMSLevel (0, 0, in.getNumSamples())), dOut = db (out.getRMSLevel (0, 0, out.getNumSamples()));
+        expect (std::abs (dOut - dIn) <= 1.0, "LEARN keeps the loudness (in " + f2 (dIn) + ", out " + f2 (dOut) + " dB RMS)");
+    }
+}
+
+void testLearnSettings()
+{
+    const double sr = 48000.0;
+    const auto drums = drumLoop (sr, 8.0, -3.0), bass = bassLine (sr, 8.0, -3.0), pad = padChord (sr, 8.0, -3.0);
+    const auto a = learnOn (drums, sr, learn::Profile::automatic, 0.5f), a2 = learnOn (drums, sr, learn::Profile::automatic, 0.5f);
+    bool same = a.valid && a2.valid && a.params.lowSplitHz == a2.params.lowSplitHz && a.params.outputDb == a2.params.outputDb;
+    for (int b = 0; b < numBands; ++b) same = same && a.params.comp[(size_t) b] == a2.params.comp[(size_t) b];
+    expect (same, "LEARN is repeatable: the same audio gives the same setting");
+    const learn::Suggestion all3[] = { a, learnOn (bass, sr, learn::Profile::automatic, 1.0f), learnOn (pad, sr, learn::Profile::automatic, 1.0f) };
+    for (const auto& sx : all3)
+    {
+        const auto* s = &sx;
+        const auto& p = s->params;
+        bool ok = s->valid && p.lowSplitHz >= lowSplitMin && p.lowSplitHz <= lowSplitMax && p.highSplitHz >= highSplitMin
+                  && p.highSplitHz <= highSplitMax && p.lowSplitHz < p.highSplitHz && p.speed >= 0.0f && p.speed <= 1.0f
+                  && p.upward >= 0.0f && p.upward <= 1.0f && p.mix >= 0.0f && p.mix <= 1.0f && p.outputDb >= -24.0f && p.outputDb <= 12.0f;
+        for (int b = 0; b < numBands; ++b) ok = ok && p.comp[(size_t) b] >= 0.0f && p.comp[(size_t) b] <= 1.0f && std::abs (p.gainDb[(size_t) b]) <= 12.0f;
+        expect (ok, "LEARN settings stay inside the ranges (" + learn::profileNames()[(int) s->profile] + ")");
+    }
+    // The bass split follows the bass: above the fundamental, below its upper harmonics.
+    const auto sb = learnOn (bass, sr, learn::Profile::bass, 0.5f);
+    expect (sb.valid && sb.params.lowSplitHz > 60.0f && sb.params.lowSplitHz < 200.0f, "LEARN BASS puts LOW|MID above the fundamental ("
+            + juce::String (sb.params.lowSplitHz, 0) + " Hz)");
+    // Punchy drums: slower SPEED than a dense synth line; a pad slow as well.
+    const auto sd = learnOn (drums, sr, learn::Profile::drums, 0.5f), sp = learnOn (pad, sr, learn::Profile::pad, 0.5f);
+    expect (sd.params.speed < 0.45f && sp.params.speed < 0.45f, "LEARN DRUMS and PAD keep the attack (SPEED " + f2 (sd.params.speed) + ", " + f2 (sp.params.speed) + ")");
+    // Instance settings stay: DIGITAL | ANALOGUE and AUTO GAIN as they were.
+    CompParams cur; cur.analog = true; cur.autoGain = false;
+    const auto si = learn::analyse (drums.getReadPointer (0), drums.getReadPointer (1), drums.getNumSamples(), sr, learn::Profile::drums, 0.5f, cur);
+    expect (si.valid && si.params.analog && ! si.params.autoGain, "LEARN keeps DIGITAL | ANALOGUE and AUTO GAIN");
+    // Nothing to learn from silence or from less than 2 s of sound.
+    Buf silence (2, (int) (5.0 * sr)); silence.clear();
+    expect (! learnOn (silence, sr, learn::Profile::automatic, 0.5f).valid, "LEARN learns nothing from silence");
+    expect (! learnOn (drumLoop (sr, 1.0, -3.0), sr, learn::Profile::automatic, 0.5f).valid, "LEARN needs at least 2 s of sound");
+    // 44.1 kHz works the same way.
+    const auto s44 = learnOn (drumLoop (44100.0, 8.0, -3.0), 44100.0, learn::Profile::drums, 0.5f);
+    expect (s44.valid && std::abs (s44.params.comp[0] - sd.params.comp[0]) < 0.08f, "LEARN at 44.1 kHz matches 48 kHz (LOW COMPRESS "
+            + f2 (s44.params.comp[0]) + " vs " + f2 (sd.params.comp[0]) + ")");
+}
+
 void testCpu()
 {
     const double sr = 96000.0;
@@ -603,6 +872,38 @@ void calibrate()
 
 int main (int argc, char** argv)
 {
+    if (argc > 2 && juce::String (argv[1]) == "--learn-raw")
+    {
+        // float32 stereo interleaved on stdin at the rate argv[2]: prints the AUTO profile and the suggestion.
+        std::vector<float> in;
+        float fr[2];
+        while (std::fread (fr, sizeof (float), 2, stdin) == 2) { in.push_back (fr[0]); in.push_back (fr[1]); }
+        const int n = (int) in.size() / 2;
+        std::vector<float> l ((size_t) n), r ((size_t) n);
+        for (int i = 0; i < n; ++i) { l[(size_t) i] = in[(size_t) i * 2]; r[(size_t) i] = in[(size_t) i * 2 + 1]; }
+        const auto s = learn::analyse (l.data(), r.data(), n, std::atof (argv[2]), learn::Profile::automatic, 0.5f, CompParams());
+        const auto& f = s.features;
+        std::cout << (s.valid ? learn::profileNames()[(int) s.profile] : juce::String ("-")) << "|onsets " << f.onsetsPerSecond << " crest " << f.crestDb
+                  << " low " << f.lowShare << " mid " << f.midShare << " high " << f.highShare << " flat " << f.midFlatnessDb << "|comp "
+                  << s.params.comp[0] << " " << s.params.comp[1] << " " << s.params.comp[2] << " split " << s.params.lowSplitHz << "/"
+                  << s.params.highSplitHz << " speed " << s.params.speed << " out " << s.params.outputDb << " red " << s.reductionDb[0] << " "
+                  << s.reductionDb[1] << " " << s.reductionDb[2] << "\n";
+        return 0;
+    }
+    if (argc > 1 && juce::String (argv[1]) == "--learn-features")
+    {
+        const double sr = 48000.0;
+        const std::pair<const char*, Buf> sig[] = { { "drums", drumLoop (sr, 8.0, -3.0) }, { "bass", bassLine (sr, 8.0, -3.0) },
+                                                    { "pad", padChord (sr, 8.0, -3.0) }, { "mix", referenceLoop (sr) } };
+        for (const auto& [name, b] : sig)
+        {
+            const auto f = learn::measure (b.getReadPointer (0), b.getReadPointer (1), b.getNumSamples(), sr);
+            std::cout << name << ": active " << f.activeSeconds << " s, onsets " << f.onsetsPerSecond << "/s, crest " << f.crestDb
+                      << " dB, low " << f.lowShare << " mid " << f.midShare << " high " << f.highShare << ", mid flatness "
+                      << f.midFlatnessDb << " dB, bass " << f.bassHz << " Hz\n";
+        }
+        return 0;
+    }
     juce::ScopedJuceInitialiser_GUI init;
     if (argc > 1 && juce::String (argv[1]) == "--calibrate")
     {
@@ -625,6 +926,12 @@ int main (int argc, char** argv)
     testSampleRates();
     testExtremes();
     testPresets();
+    testLearnAuto();
+    testLearnEmptyBand();
+    testLearnKeepsTone();
+    testLearnHitsTarget();
+    testLearnAmountAndLevel();
+    testLearnSettings();
     testCpu();
     std::cout << (failures == 0 ? "PASS " : "FAILED ") << (checks - failures) << "/" << checks << " checks\n";
     return failures == 0 ? 0 : 1;

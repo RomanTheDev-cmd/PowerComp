@@ -613,6 +613,134 @@ void AdvancedPanel::resized()
 }
 
 //==============================================================================
+LearnPanel::LearnPanel (PowerCompProcessor& p) : proc (p)
+{
+    static const char* hints[] = {
+        "АВТО: сила и скорость подстраиваются под сам материал (уже сжатое трогается мягче), жанр не угадывается",
+        "Барабаны: удар сохраняется (медленная атака), параллельное сжатие", "Бас: ровный низ, разделитель над основным тоном",
+        "Синты и лиды", "Пэды: медленно, подтягивает хвосты", "Шина и мастер: лёгкая склейка" };
+    for (int i = 0; i < pc::learn::profileNames().size(); ++i)
+    {
+        auto* b = profiles.add (new juce::TextButton (pc::learn::profileNames()[i]));
+        b->setClickingTogglesState (true);
+        b->setRadioGroupId (4711);
+        b->setTooltip (ru (hints[i]));
+        b->onClick = [this, i, b] { if (b->getToggleState()) proc.setLearnProfile ((pc::learn::Profile) i); };
+        addAndMakeVisible (b);
+    }
+    amount.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    amount.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    amount.setRange (0.0, 1.0);
+    amount.setDoubleClickReturnValue (true, 0.5);
+    amount.getProperties().set ("primary", true);
+    amount.setTooltip (ru ("Насколько сильно сжимать: 50 % — норма профиля, 0 — не сжимать. После LEARN меняется без нового прослушивания"));
+    amount.onDragEnd = [this] { proc.setLearnAmount ((float) amount.getValue()); };
+    amount.onValueChange = [this] { if (! amount.isMouseButtonDown()) proc.setLearnAmount ((float) amount.getValue()); repaint(); };
+    addAndMakeVisible (amount);
+    listenButton.setTooltip (ru ("Слушать дорожку: включите воспроизведение, 2–20 секунд звука. Повторное нажатие — закончить раньше"));
+    listenButton.onClick = [this]
+    {
+        if (proc.getLearnState() == PowerCompProcessor::LearnState::listening) proc.stopLearning();
+        else proc.startLearning();
+        refresh();
+    };
+    for (auto* b : { &beforeButton, &learnedButton })
+    {
+        b->setClickingTogglesState (false);
+        addAndMakeVisible (b);
+    }
+    beforeButton.setTooltip (ru ("Настройка до LEARN — для сравнения на той же громкости"));
+    learnedButton.setTooltip (ru ("Настройка после LEARN (ручные правки сохраняются)"));
+    beforeButton.onClick = [this] { proc.showLearned (false); refresh(); if (onSettingChanged) onSettingChanged(); };
+    learnedButton.onClick = [this] { proc.showLearned (true); refresh(); if (onSettingChanged) onSettingChanged(); };
+    addAndMakeVisible (listenButton);
+    listenButton.setComponentID ("learnListen");
+    refresh();
+}
+
+void LearnPanel::refresh()
+{
+    using State = PowerCompProcessor::LearnState;
+    const auto st = proc.getLearnState();
+    const int prof = (int) proc.getLearnProfile();
+    for (int i = 0; i < profiles.size(); ++i)
+        profiles[i]->setToggleState (i == prof, juce::dontSendNotification);
+    if (! amount.isMouseButtonDown())
+        amount.setValue (proc.getLearnAmount(), juce::dontSendNotification);
+    listenButton.setButtonText (st == State::listening ? "STOP" : (st == State::analysing ? "ANALYSING" : (proc.hasLearned() ? "LISTEN AGAIN" : "LISTEN")));
+    listenButton.setToggleState (st == State::listening, juce::dontSendNotification);
+    listenButton.setEnabled (st != State::analysing);
+    beforeButton.setEnabled (proc.hasLearned());
+    learnedButton.setEnabled (proc.hasLearned());
+    beforeButton.setToggleState (proc.hasLearned() && ! proc.isShowingLearned(), juce::dontSendNotification);
+    learnedButton.setToggleState (proc.hasLearned() && proc.isShowingLearned(), juce::dontSendNotification);
+    juce::String s;
+    float pr = -1.0f;
+    const auto& r = proc.lastLearn();
+    if (st == State::listening)
+    {
+        s = "LISTENING  " + juce::String (proc.learnedSeconds(), 1) + " S  -  PLAY THE TRACK, STOPS AT 20 S";
+        pr = (float) (proc.learnedSeconds() / pc::learn::maxSeconds);
+    }
+    else if (st == State::analysing)
+        s = "ANALYSING...";
+    else if (proc.hasLearned() && r.valid)
+        s = "LEARNED (" + pc::learn::profileNames()[(int) r.profile] + "):  LOUD PARTS  " + juce::String (-r.reductionDb[0], 1) + " / "
+            + juce::String (-r.reductionDb[1], 1) + " / " + juce::String (-r.reductionDb[2], 1) + " DB";
+    else if (r.features.activeSeconds > 0.0f && ! r.valid)
+        s = "NOT ENOUGH SOUND  -  PLAY AT LEAST 2 S";
+    else
+        s = "PRESS LISTEN AND PLAY THE TRACK";
+    if (s != status || ! juce::exactlyEqual (pr, progress))
+    {
+        status = s;
+        progress = pr;
+        repaint();
+    }
+}
+
+void LearnPanel::paint (juce::Graphics& g)
+{
+    const float s = (float) getWidth() / 520.0f;
+    auto S = [s] (float v) { return juce::roundToInt (v * s); };
+    fillOverlay (g, getLocalBounds().toFloat());
+    g.setFont (uiFont (11.0f * s, true).withExtraKerningFactor (0.18f));
+    g.setColour (colours::dim);
+    g.drawText ("LEARN", juce::Rectangle<int> (S (16), S (10), S (200), S (16)), juce::Justification::centredLeft);
+    g.setFont (uiFont (10.5f * s, true).withExtraKerningFactor (0.1f));
+    g.setColour (colours::faint);
+    g.drawText ("AMOUNT", juce::Rectangle<int> (S (16), S (78), S (96), S (14)), juce::Justification::centred);
+    g.setColour (colours::text);
+    g.setFont (uiFont (12.0f * s, true));
+    g.drawText (juce::String (juce::roundToInt (amount.getValue() * 100.0)) + " %", juce::Rectangle<int> (S (16), S (166), S (96), S (16)),
+                juce::Justification::centred);
+    g.setFont (uiFont (10.5f * s, true).withExtraKerningFactor (0.06f));
+    g.setColour (colours::dim);
+    g.drawFittedText (status, juce::Rectangle<int> (S (132), S (128), S (372), S (30)), juce::Justification::centredLeft, 2);
+    if (progress >= 0.0f)
+    {
+        const auto bar = juce::Rectangle<float> ((float) S (132), (float) S (166), (float) S (372), (float) S (4));
+        g.setColour (juce::Colours::white.withAlpha (0.08f));
+        g.fillRoundedRectangle (bar, bar.getHeight() * 0.5f);
+        g.setColour (colours::accent);
+        g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, progress)), bar.getHeight() * 0.5f);
+    }
+}
+
+void LearnPanel::resized()
+{
+    const float s = (float) getWidth() / 520.0f;
+    auto S = [s] (float v) { return juce::roundToInt (v * s); };
+    const int n = profiles.size(), gap = S (4), w = (S (488) - gap * (n - 1)) / n;
+    for (int i = 0; i < n; ++i)
+        profiles[i]->setBounds (S (16) + i * (w + gap), S (36), w, S (28));
+    amount.setBounds (S (24), S (92), S (80), S (72));
+    listenButton.setBounds (S (132), S (88), S (160), S (32));
+    beforeButton.setBounds (S (308), S (88), S (96), S (32));
+    learnedButton.setBounds (S (408), S (88), S (96), S (32));
+}
+
+//==============================================================================
 namespace
 {
 const juce::String userCategory { "User" };
@@ -1010,7 +1138,7 @@ PowerCompEditor::PowerCompEditor (PowerCompProcessor& p)
       output (p.state, pc::id::output, "OUTPUT", ru ("Общая громкость на выходе")),
       analogMode (p.state, pc::id::analog, { "DIGITAL", "ANALOGUE" },
                   ru ("DIGITAL — чистое сжатие. ANALOGUE — тёплое мягкое насыщение низа и середины. Смена пресета его не меняет")),
-      display (p), advanced (p.state), browser (p)
+      display (p), advanced (p.state), learnPanel (p), browser (p)
 {
     setLookAndFeel (&lnf);
     for (int b = 0; b < pc::numBands; ++b)
@@ -1041,6 +1169,15 @@ PowerCompEditor::PowerCompEditor (PowerCompProcessor& p)
         addAndMakeVisible (c);
     meter.setComponentID ("outputMeter");
     addChildComponent (advanced);
+    addChildComponent (learnPanel);
+    addAndMakeVisible (learnButton);
+    learnButton.setComponentID ("learnButton");
+    learnPanel.setComponentID ("learnPanel");
+    learnButton.setClickingTogglesState (false);
+    learnButton.onClick = [this] { toggleLearn(); };
+    learnButton.setTooltip (ru ("LEARN: плагин слушает дорожку и сам выставляет настройки (профиль и силу можно выбрать). "
+                                "Всё остаётся доступно вручную, пресеты работают как обычно"));
+    learnPanel.onSettingChanged = [this] { refreshHeader(); };
     addChildComponent (browser);
     presetButton.setComponentID ("presetButton");
     browser.setComponentID ("presetBrowser");
@@ -1058,6 +1195,7 @@ PowerCompEditor::PowerCompEditor (PowerCompProcessor& p)
         }
         if (advancedButton.getToggleState())
             advancedButton.setToggleState (false, juce::sendNotification);
+        learnPanel.setVisible (false);
         presetButton.setToggleState (true, juce::dontSendNotification);
         browser.open();
     };
@@ -1074,6 +1212,8 @@ PowerCompEditor::PowerCompEditor (PowerCompProcessor& p)
     {
         if (advancedButton.getToggleState() && browser.isVisible())
             browser.onClose();
+        if (advancedButton.getToggleState())
+            learnPanel.setVisible (false);
         advanced.setVisible (advancedButton.getToggleState());
     };
     presetButton.setTooltip (ru ("Пресеты: щелчок — список по задачам (мастер, барабаны, бас, синты, вокал)"));
@@ -1152,6 +1292,8 @@ void PowerCompEditor::resized()
     menuButton.setBounds (header.removeFromRight (S (40)));
     header.removeFromRight (S (8));
     advancedButton.setBounds (header.removeFromRight (S (96)));
+    header.removeFromRight (S (8));
+    learnButton.setBounds (header.removeFromRight (S (120)));
     auto left = getLocalBounds().removeFromTop (S (60)).reduced (S (24), S (14));
     left.removeFromLeft (S (136));
     analogMode.setBounds (left.removeFromLeft (S (164)));
@@ -1217,6 +1359,7 @@ void PowerCompEditor::resized()
     mix.setBounds (d);
 
     advanced.setBounds (getWidth() - S (24) - S (520), S (64), S (520), S (150));
+    learnPanel.setBounds (getWidth() - S (24) - S (520), S (64), S (520), S (196));
     browser.setBounds (getLocalBounds().withTrimmedTop (S (60)).reduced (S (24), S (14)));
 }
 
@@ -1226,6 +1369,18 @@ void PowerCompEditor::timerCallback()
     for (size_t b = 0; b < (size_t) pc::numBands; ++b)
         gainMeters[b]->setValues (proc.reductionDb[b].exchange (0.0f), proc.boostDb[b].exchange (0.0f));
     display.updateSpectrum();
+    // LEARN: what it is doing, on the button and in its panel; a new result changes the name in the header.
+    {
+        using State = PowerCompProcessor::LearnState;
+        const auto st = proc.getLearnState();
+        learnButton.setButtonText (st == State::listening ? "LISTENING " + juce::String ((int) proc.learnedSeconds()) + " S"
+                                                         : (st == State::analysing ? "ANALYSING" : "LEARN"));
+        learnButton.setToggleState (st != State::idle || learnPanel.isVisible(), juce::dontSendNotification);
+        if (learnPanel.isVisible())
+            learnPanel.refresh();
+        if (presetButton.getButtonText() != proc.getPresetName())
+            refreshHeader();
+    }
     // The band titles show the crossover frequencies.
     const float lo = proc.state.getRawParameterValue (pc::id::lowSplit)->load(), hi = proc.state.getRawParameterValue (pc::id::highSplit)->load();
     if (! juce::exactlyEqual (lo, shownSplits[0]) || ! juce::exactlyEqual (hi, shownSplits[1]))
@@ -1236,6 +1391,27 @@ void PowerCompEditor::timerCallback()
             if (sec.band >= 0)
                 repaint (sec.area);
     }
+}
+
+void PowerCompEditor::toggleLearn()
+{
+    // One click learns (as in sonible): the panel opens and listening starts; a click while listening stops it.
+    if (proc.getLearnState() == PowerCompProcessor::LearnState::listening)
+        proc.stopLearning();
+    else if (! learnPanel.isVisible())
+    {
+        if (browser.isVisible())
+            browser.onClose();
+        if (advancedButton.getToggleState())
+            advancedButton.setToggleState (false, juce::sendNotification);
+        learnPanel.setVisible (true);
+        if (proc.getLearnState() == PowerCompProcessor::LearnState::idle && ! proc.hasLearned())
+            proc.startLearning();
+    }
+    else
+        learnPanel.setVisible (false);
+    learnPanel.refresh();
+    timerCallback();
 }
 
 //==============================================================================

@@ -42,7 +42,8 @@ bool presetFromXml (const juce::String& xml, Preset& out, juce::String& error);
 class PresetLibrary
 {
 public:
-    static constexpr const char* extension = ".pspreset";
+    static constexpr const char* extension = ".pcpreset";
+    static constexpr const char* legacyExtension = ".pspreset"; // 1.0.0 saved user presets with this by mistake
 
     explicit PresetLibrary (juce::File userDirectory = defaultUserDirectory());
     static juce::File defaultUserDirectory();

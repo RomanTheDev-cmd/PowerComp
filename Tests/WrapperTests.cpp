@@ -137,11 +137,138 @@ void testProcessing()
     expect (d2 < 1.0e-5f, "prepare again at 96 kHz = a fresh instance (" + juce::String (d2) + ")");
 }
 
+// LEARN through the processor (2026-10-28): listening does not change the sound, the result lands on the ordinary
+// parameters, BEFORE | LEARNED switch exactly, AMOUNT re-applies from the same capture, the profile and AMOUNT are
+// saved with the project, presets still load.
+juce::AudioBuffer<float> beat (int blocks, double sr = 48000.0, float gain = 0.7f)
+{
+    juce::AudioBuffer<float> b (2, 512 * blocks);
+    juce::Random rng (5);
+    const double pi = juce::MathConstants<double>::pi, period = 60.0 / 140.0;
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        const double t = i / sr, tb = std::fmod (t, period);
+        const float x = (float) (gain * (std::exp (-tb / 0.15) * std::sin (2.0 * pi * 50.0 * tb) + 0.3 * std::exp (-std::fmod (t, period / 4) / 0.02) * (rng.nextFloat() - 0.5f)
+                                         + 0.1 * std::sin (2.0 * pi * 440.0 * t)));
+        b.setSample (0, i, x);
+        b.setSample (1, i, x);
+    }
+    return b;
+}
+
+juce::AudioBuffer<float> feed (PowerCompProcessor& p, const juce::AudioBuffer<float>& in)
+{
+    juce::AudioBuffer<float> out (in), block (2, 512);
+    juce::MidiBuffer m;
+    for (int pos = 0; pos + 512 <= in.getNumSamples(); pos += 512)
+    {
+        for (int c = 0; c < 2; ++c) block.copyFrom (c, 0, in, c, pos, 512);
+        p.processBlock (block, m);
+        for (int c = 0; c < 2; ++c) out.copyFrom (c, pos, block, c, 0, 512);
+    }
+    return out;
+}
+
+void testLearn()
+{
+    const auto in = beat (94 * 6); // about 6 s
+    PowerCompProcessor ref, p;
+    ref.prepareToPlay (48000.0, 512);
+    p.prepareToPlay (48000.0, 512);
+    const auto before = pc::captureSnapshot (p.state);
+    const auto nameBefore = p.getPresetName();
+    p.startLearning();
+    expect (p.getLearnState() == PowerCompProcessor::LearnState::listening, "LEARN starts listening");
+    const auto a = feed (ref, in), b = feed (p, in);
+    bool same = true;
+    for (int c = 0; c < 2; ++c)
+        for (int i = 0; i < a.getNumSamples(); ++i) same = same && a.getSample (c, i) == b.getSample (c, i);
+    expect (same, "listening does not change the sound");
+    expect (p.learnedSeconds() > 5.5 && p.learnedSeconds() < 6.5, "LEARN captured the played audio (" + juce::String (p.learnedSeconds(), 2) + " s)");
+    p.stopLearning();
+    p.waitForLearn();
+    expect (p.getLearnState() == PowerCompProcessor::LearnState::idle && p.hasLearned() && p.isShowingLearned(), "LEARN analyses and applies");
+    const auto learned = pc::captureSnapshot (p.state);
+    const auto s = p.lastLearn(); // a copy: lastLearn() changes when AMOUNT re-applies
+    bool applied = s.valid;
+    for (int b2 = 0; b2 < pc::numBands; ++b2) applied = applied && std::abs (plain (p, pc::id::comp[b2]) - s.params.comp[(size_t) b2]) < 0.01f;
+    expect (applied && learned != before, "the suggestion lands on the ordinary parameters");
+    expect (p.getPresetName().startsWith ("LEARN"), "the header shows the learned setting (" + p.getPresetName() + ")");
+    // Manual changes after LEARN work like on any setting.
+    setPlain (p, pc::id::comp[1], 0.9f);
+    expect (std::abs (plain (p, pc::id::comp[1]) - 0.9f) < 0.01f, "the knobs stay manual after LEARN");
+    // BEFORE | LEARNED switch exactly (each keeps its own changes).
+    p.showLearned (false);
+    expect (pc::captureSnapshot (p.state) == before && p.getPresetName() == nameBefore && ! p.isShowingLearned(), "BEFORE restores the setting before LEARN exactly");
+    p.showLearned (true);
+    expect (std::abs (plain (p, pc::id::comp[1]) - 0.9f) < 0.01f && p.isShowingLearned(), "LEARNED comes back with the manual change");
+    // AMOUNT re-applies from the same capture, without listening again.
+    p.setLearnProfile (pc::learn::Profile::drums);
+    p.setLearnAmount (1.0f);
+    p.waitForLearn();
+    expect (p.lastLearn().valid && p.lastLearn().profile == pc::learn::Profile::drums && p.lastLearn().targetDb[1] > s.targetDb[1],
+            "AMOUNT and the profile re-apply from the same capture");
+    // Saved with the project; presets do not change them; an old project opens with AUTO and 50 %.
+    juce::MemoryBlock m;
+    p.getStateInformation (m);
+    PowerCompProcessor q;
+    q.setStateInformation (m.getData(), (int) m.getSize());
+    expect (q.getLearnProfile() == pc::learn::Profile::drums && std::abs (q.getLearnAmount() - 1.0f) < 1.0e-6f, "the project keeps the LEARN profile and AMOUNT");
+    q.loadPreset (3);
+    expect (q.getLearnProfile() == pc::learn::Profile::drums && ! q.hasLearned(), "a preset loads after LEARN and keeps the LEARN choice");
+    PowerCompProcessor fresh;
+    expect (fresh.getLearnProfile() == pc::learn::Profile::automatic && std::abs (fresh.getLearnAmount() - 0.5f) < 1.0e-6f, "a project without LEARN opens with AUTO, 50 %");
+    // Too little sound: nothing changes.
+    PowerCompProcessor r;
+    r.prepareToPlay (48000.0, 512);
+    const auto keep = pc::captureSnapshot (r.state);
+    r.startLearning();
+    feed (r, beat (94));
+    r.stopLearning();
+    r.waitForLearn();
+    expect (! r.hasLearned() && pc::captureSnapshot (r.state) == keep && r.getLearnState() == PowerCompProcessor::LearnState::idle,
+            "LEARN with less than 2 s of sound changes nothing");
+    // A full capture (20 s) stops listening by itself.
+    PowerCompProcessor f;
+    f.prepareToPlay (44100.0, 512);
+    f.startLearning();
+    feed (f, beat (94 * 22, 44100.0));
+    f.waitForLearn();
+    expect (f.hasLearned() && f.learnedSeconds() <= 20.01, "LEARN stops by itself after 20 s of sound (" + juce::String (f.learnedSeconds(), 2) + " s)");
+}
+
+// User presets are .pcpreset (1.0.0 saved them as .pspreset by mistake: those still load).
+void testPresetFiles()
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("PowerCompPresetTest-" + juce::String (juce::Random::getSystemRandom().nextInt()));
+    dir.createDirectory();
+    pc::PresetLibrary lib (dir);
+    juce::String err;
+    lib.saveUser ("Mine", pc::factoryPresets()[1].values, err);
+    expect (dir.getChildFile ("Mine.pcpreset").existsAsFile(), "a user preset is saved as .pcpreset");
+    dir.getChildFile ("Mine.pcpreset").copyFileTo (dir.getChildFile ("Old.pspreset"));
+    lib.rescan();
+    expect (lib.indexOf ("Mine") >= 0 && lib.indexOf ("Old") >= 0, "user presets of 1.0.0 (.pspreset) still load");
+    dir.moveToTrash();
+}
+
 void testEditor()
 {
     PowerCompProcessor p;
     p.prepareToPlay (48000.0, 512);
     std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+    if (auto* lb = dynamic_cast<juce::Button*> (ed->findChildWithID ("learnButton")))
+    {
+        auto* panel = ed->findChildWithID ("learnPanel");
+        lb->onClick();
+        const bool started = panel != nullptr && panel->isVisible() && p.getLearnState() == PowerCompProcessor::LearnState::listening;
+        lb->onClick();
+        const bool stopped = p.getLearnState() == PowerCompProcessor::LearnState::idle; // nothing heard: cancelled
+        lb->onClick();
+        expect (started && stopped && ! panel->isVisible(), "one click on LEARN opens its panel and listens, the next stops, the next closes");
+    }
+    else
+        expect (false, "the header has a LEARN button");
     for (auto [w, h] : { std::pair { 1080, 720 }, std::pair { 864, 576 }, std::pair { 1620, 1080 } })
     {
         ed->setSize (w, h);
@@ -234,6 +361,21 @@ void snapshot (const juce::File& dir)
         if (auto* b = dynamic_cast<juce::Button*> (adv)) { b->setToggleState (true, juce::sendNotification); save (*ed, "advanced.png"); b->setToggleState (false, juce::sendNotification); }
     if (auto* pb = ed->findChildWithID ("presetButton"))
         if (auto* b = dynamic_cast<juce::Button*> (pb)) { b->onClick(); save (*ed, "browser.png"); b->onClick(); }
+    // LEARN: listening, then the result.
+    if (auto* lb = dynamic_cast<juce::Button*> (ed->findChildWithID ("learnButton")))
+    {
+        lb->onClick();
+        ::feed (p, beat (94 * 3));
+        if (auto* panel = dynamic_cast<pc::ui::LearnPanel*> (ed->findChildWithID ("learnPanel"))) panel->refresh();
+        save (*ed, "learn_listening.png");
+        ::feed (p, beat (94 * 5));
+        lb->onClick();
+        p.waitForLearn();
+        lb->onClick(); // closes the panel and updates the header
+        lb->onClick(); // opens it again with the result (no new listening after a LEARN)
+        save (*ed, "learn_done.png");
+        lb->onClick();
+    }
     ed->setSize (864, 576); save (*ed, "main_small.png");
     ed->setSize (1620, 1080); save (*ed, "main_large.png");
 }
@@ -250,6 +392,8 @@ int main (int argc, char** argv)
     testStateRoundTrip();
     testPresets();
     testProcessing();
+    testLearn();
+    testPresetFiles();
 #if JUCE_MAC || JUCE_WINDOWS
     testEditor();
 #endif

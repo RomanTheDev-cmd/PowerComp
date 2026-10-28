@@ -142,6 +142,26 @@ private:
     Knob link;
 };
 
+// LEARN (2026-10-28): the profile, AMOUNT, LISTEN / STOP, BEFORE | LEARNED and what LEARN is doing. Opens over the
+// controls from the LEARN button in the header, like ADVANCED.
+class LearnPanel : public juce::Component
+{
+public:
+    explicit LearnPanel (PowerCompProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh(); // from the editor timer
+    std::function<void()> onSettingChanged; // BEFORE | LEARNED switched: the header shows the other name
+
+private:
+    PowerCompProcessor& proc;
+    juce::OwnedArray<juce::TextButton> profiles;
+    juce::Slider amount;
+    juce::TextButton listenButton { "LISTEN" }, beforeButton { "BEFORE" }, learnedButton { "LEARNED" };
+    juce::String status;
+    float progress = -1.0f;
+};
+
 // Preset browser: opens over the controls from the preset name. Categories on the left, a search field
 // and intensity filters on top, every matching preset in one scrolling list. Choosing a preset loads it
 // at once; arrow keys step through the list, Enter or Escape closes.
@@ -234,7 +254,7 @@ private:
     juce::TooltipWindow tooltips { this, 600 };
 
     juce::TextButton prevButton { "<" }, nextButton { ">" }, presetButton, saveButton { "SAVE" }, advancedButton { "ADVANCED" },
-        menuButton { "..." };
+        menuButton { "..." }, learnButton { "LEARN" };
 
     std::array<std::unique_ptr<pc::ui::Knob>, pc::numBands> compress, gain;
     std::array<std::unique_ptr<pc::ui::Segment>, pc::numBands> solo, bypass;
@@ -244,6 +264,8 @@ private:
     pc::ui::BandDisplay display;
     pc::ui::Meter meter;
     pc::ui::AdvancedPanel advanced;
+    pc::ui::LearnPanel learnPanel;
+    void toggleLearn();
     pc::ui::PresetBrowser browser;
 
     std::unique_ptr<juce::FileChooser> chooser;

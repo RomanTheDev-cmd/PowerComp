@@ -180,6 +180,9 @@ void PresetLibrary::rescan()
 {
     presets = factoryPresets();
     juce::Array<juce::File> files = userDir.findChildFiles (juce::File::findFiles, false, juce::String ("*") + extension);
+    for (const auto& f : userDir.findChildFiles (juce::File::findFiles, false, juce::String ("*") + legacyExtension))
+        if (! userDir.getChildFile (f.getFileNameWithoutExtension() + extension).existsAsFile())
+            files.add (f);
     files.sort();
     for (const auto& f : files)
     {
