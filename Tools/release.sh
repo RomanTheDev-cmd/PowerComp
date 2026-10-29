@@ -26,7 +26,7 @@ done; "$BIN/wineserver" -k 2>/dev/null
 S="$D/Сборки"; Uo=$U/${P}_artefacts/Release; Wo=$BW/${P}_artefacts/Release; I=~/Library/Audio/Plug-Ins
 for b in "$Uo/AU/$P.component" "$Uo/VST3/$P.vst3"; do codesign --force --deep --sign - "$b" 2>/dev/null; codesign --verify --deep --strict "$b" || fail "подпись $b"; done
 T=~/.Trash/"$P до $STAMP"; old() { [ -e "$1" ] && mkdir -p "$2" && mv "$1" "$2/"; return 0; }
-old "$S/macOS/$P.component" "$T/macOS"; old "$S/macOS/$P.vst3" "$T/macOS"; old "$S/Windows/$P.vst3" "$T/Windows"; old "$S/$P-$VER-Windows-x64.zip" "$T"
+old "$S/macOS/$P.component" "$T/macOS"; old "$S/macOS/$P.vst3" "$T/macOS"; old "$S/Windows/$P.vst3" "$T/Windows"; for z in "$S/$P"-*-Windows-x64.zip; do old "$z" "$T"; done   # any version (1.1.0 left the 1.0.0 zip behind)
 mkdir -p "$S/macOS" "$S/Windows"
 ditto "$Uo/AU/$P.component" "$S/macOS/$P.component"; ditto "$Uo/VST3/$P.vst3" "$S/macOS/$P.vst3"; ditto "$Wo/VST3/$P.vst3" "$S/Windows/$P.vst3"
 Z=$(mktemp -d); ditto "$S/Windows" "$Z/$P"; (cd "$Z" && zip -qr -X -D "$S/$P-$VER-Windows-x64.zip" "$P" -x "*.DS_Store"); rm -rf "$Z"
