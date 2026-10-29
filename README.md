@@ -23,11 +23,11 @@
 
 ## Установка
 
-**Установщики** из папки `Установщики`: `PowerComp-1.0.0-macOS.pkg` и `PowerComp-1.0.0-Windows-x64-Setup.exe` (подробно — `УСТАНОВКА.txt` там же).
+**Установщики** из папки `Установщики`: `PowerComp-1.1.0-macOS.pkg` и `PowerComp-1.1.0-Windows-x64-Setup.exe` (подробно — `УСТАНОВКА.txt` там же).
 
 **macOS вручную** из `Сборки/macOS`: `PowerComp.component` → `~/Library/Audio/Plug-Ins/Components/`, `PowerComp.vst3` → `~/Library/Audio/Plug-Ins/VST3/`. На этом Mac плагин уже установлен. В Logic: Audio FX → Audio Units → MyDarknessDays → PowerComp (после перезапуска Logic).
 
-**Windows вручную:** папку `PowerComp.vst3` из `Сборки/PowerComp-1.0.0-Windows-x64.zip` целиком в `C:\Program Files\Common Files\VST3\`.
+**Windows вручную:** папку `PowerComp.vst3` из `Сборки/PowerComp-1.1.0-Windows-x64.zip` целиком в `C:\Program Files\Common Files\VST3\`.
 
 ## Регуляторы
 
@@ -52,7 +52,7 @@
 
 **ADVANCED:** AUTO GAIN (по умолчанию включён: COMPRESS делает звук ровнее, а не тише; выключенный — обычный компрессор), STEREO LINK (одинаковое сжатие каналов, 100 % — стереокартина не плывёт).
 
-**Пресеты** (20): щелчок по имени открывает список: слева категории (Master, Drums, Bass, Synths, Vocals, Creative) и свои пресеты, сверху поиск и сила (Light, Medium, Heavy). Свои пресеты — `Документы/PowerComp/Presets`, формат `.pcpreset`. Все заводские пресеты выровнены по громкости: на эталонном техно-лупе выход так же громок, как вход, поэтому сравнивать их честно.
+**Пресеты** (20): щелчок по имени открывает список: слева категории (Master, Drums, Bass, Synths, Vocals, Creative) и свои пресеты, сверху поиск и сила (Light, Medium, Heavy). Звёздочка слева от имени пресета (или рядом с именем в шапке) добавляет его в «Favourites» — пункт слева над своими пресетами; звёздочки общие для всех проектов (`Favourites.json` в папке своих пресетов, 2026-10-29). Свои пресеты — `Документы/PowerComp/Presets`, формат `.pcpreset`. Все заводские пресеты выровнены по громкости: на эталонном техно-лупе выход так же громок, как вход, поэтому сравнивать их честно.
 
 Задержки нет (0 отсчётов): плагин можно ставить на бочку и шины без сдвига.
 

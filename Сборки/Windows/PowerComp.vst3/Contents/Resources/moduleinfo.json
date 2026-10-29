@@ -1,6 +1,6 @@
 {
   "Name": "PowerComp",
-  "Version": "1.0.0",
+  "Version": "1.1.0",
   "Factory Info": {
     "Vendor": "MyDarknessDays",
     "URL": "",
@@ -17,7 +17,7 @@
       "Category": "Audio Module Class",
       "Name": "PowerComp",
       "Vendor": "MyDarknessDays",
-      "Version": "1.0.0",
+      "Version": "1.1.0",
       "SDKVersion": "VST 3.8.0",
       "Sub Categories": [
         "Fx",
@@ -33,7 +33,7 @@
       "Category": "Component Controller Class",
       "Name": "PowerComp",
       "Vendor": "MyDarknessDays",
-      "Version": "1.0.0",
+      "Version": "1.1.0",
       "SDKVersion": "VST 3.8.0",
       "Sub Categories": [
         "Fx",
